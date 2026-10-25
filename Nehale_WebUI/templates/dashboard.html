@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+{% block title %}Live · Nehale Meter{% endblock %}
+{% block body %}
+<div class="statusbar">
+  <div><span id="online" class="pill off">Waiting for meter</span> <span id="seen" class="muted small"></span></div>
+  <div class="muted small">Meter date: <b id="mtime">--</b> · Tariff N$ {{ '%.2f'|format(tariff) }}/kWh</div>
+</div>
+
+<div id="nodata" class="card empty-state" hidden>
+  <h2>No readings yet</h2>
+  <p class="muted">Set <code>BACKEND_URL</code> in the ESP32 firmware to
+    <code id="burl"></code> and power the meter, or run <code>python simulate_meter.py</code> to test.</p>
+</div>
+
+<section class="grid cols-5" id="tiles">
+  <div class="card tile hero">
+    <div class="label">Balance</div>
+    <div class="value"><span id="bal">--</span><small>kWh</small></div>
+    <div class="foot">≈ N$ <span id="balnad">--</span></div>
+  </div>
+  <div class="card tile">
+    <div class="label">Power</div>
+    <div class="value"><span id="watts">--</span><small>W</small></div>
+    <div class="foot">Load: <b id="state">--</b></div>
+  </div>
+  <div class="card tile">
+    <div class="label">Voltage</div>
+    <div class="value"><span id="volts">--</span><small>V</small></div>
+    <div class="foot">from 27k/10k divider</div>
+  </div>
+  <div class="card tile">
+    <div class="label">Current</div>
+    <div class="value"><span id="amps">--</span><small>A</small></div>
+    <div class="foot">ACS712</div>
+  </div>
+  <div class="card tile">
+    <div class="label">Used today</div>
+    <div class="value"><span id="today">--</span><small>kWh</small></div>
+    <div class="foot">Total <span id="total">--</span> kWh</div>
+  </div>
+</section>
+
+<section class="grid cols-2" style="margin-top:16px">
+  <div class="stack">
+    <div class="card">
+      <h2>Prediction &amp; top-up recommendation</h2>
+      <div class="pred-main">
+        <span class="pred-days" id="daysleft">--</span><span class="pred-unit">days of units left</span>
+      </div>
+      <div class="muted small" style="margin-top:6px">Units should last until <b id="runout">--</b></div>
+      <div class="advice unknown" id="advice">Waiting for data…</div>
+      <div class="kv">
+        <div>Top up by</div><div id="topupby">--</div>
+        <div>Recommended top-up (to last <span id="tdays">30</span> days)</div><div id="rec">--</div>
+        <div>Forecast use</div><div id="predrate">--</div>
+        <div>At the load running now</div><div id="liverate">--</div>
+      </div>
+      <div class="method">Method: <span id="method">--</span> · <span id="histdays">0</span> days of history</div>
+    </div>
+    <div class="card">
+      <h2>Live power <span class="sub">last 60 readings</span></h2>
+      <div class="chart-box"><canvas id="powerChart"></canvas></div>
+    </div>
+  </div>
+
+  <div class="stack">
+    <div class="card">
+      <h2>Top up remotely</h2>
+      <form class="topup" id="topupForm">
+        <div class="quick">
+          <button type="button" data-nad="5">N$ 5</button>
+          <button type="button" data-nad="10">N$ 10</button>
+          <button type="button" data-nad="20">N$ 20</button>
+          <button type="button" id="recBtn" data-nad="0">Recommended</button>
+        </div>
+        <div>
+          <label for="nad">Amount (N$)</label>
+          <input type="number" id="nad" min="1" step="1" placeholder="e.g. 10" required>
+          <div class="convert" id="convert">= -- kWh</div>
+        </div>
+        {% if need_pin %}
+        <div>
+          <label for="pin">Top-up PIN</label>
+          <input type="password" id="pin" inputmode="numeric" autocomplete="off" required>
+        </div>
+        {% endif %}
+        <button class="primary" type="submit" id="topupBtn">Send top-up to meter</button>
+        <div class="msg" id="topupMsg"></div>
+        <div class="muted small">The meter collects web top-ups every 15 s. Status goes
+          <span class="badge queued">queued</span> → <span class="badge sent">sent</span> →
+          <span class="badge confirmed">confirmed</span>.</div>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Recent top-ups</h2>
+      <table><thead><tr><th>Time (UTC)</th><th class="num">N$</th><th class="num">kWh</th><th>Status</th></tr></thead>
+        <tbody id="topups"><tr><td colspan="4" class="muted">None yet</td></tr></tbody></table>
+    </div>
+    <div class="card">
+      <h2>Next 7 days</h2>
+      <table><thead><tr><th>Day</th><th class="num">Use (kWh)</th><th class="num">Balance after</th></tr></thead>
+        <tbody id="fcTable"></tbody></table>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const TARIFF = {{ tariff }};
+const MAX_KWH = {{ max_kwh }};
+document.getElementById('burl').textContent = location.origin + '/api/meter';
+let recNad = 0, powerChart = null;
+
+function setPill(el, cls, text) { el.className = 'pill ' + cls; el.textContent = text; }
+
+function drawPower(recent) {
+  if (!window.Chart) return;
+  const labels = recent.map(r => (r.t || '').slice(5)), data = recent.map(r => r.w);
+  if (!powerChart) {
+    powerChart = new Chart(document.getElementById('powerChart'), {
+      type: 'line',
+      data: { labels, datasets: [{ label: 'Power (W)', data, borderColor: css('--chart1'),
+              backgroundColor: css('--accent-soft'), fill: true, tension: .3, pointRadius: 0, borderWidth: 2 }] },
+      options: { animation: false, maintainAspectRatio: false, plugins: { legend: { display: false } },
+                 scales: { x: { ticks: { maxTicksLimit: 6 } }, y: { beginAtZero: true, title: { display: true, text: 'W' } } } }
+    });
+  } else {
+    powerChart.data.labels = labels; powerChart.data.datasets[0].data = data; powerChart.update();
+  }
+}
+
+async function refresh() {
+  let d;
+  try { d = await getJSON('/api/live?meter=' + encodeURIComponent(METER)); }
+  catch (e) { setPill(document.getElementById('online'), 'bad', 'Server not reachable'); return; }
+  document.getElementById('nodata').hidden = d.has_data;
+  if (!d.has_data) return;
+  const r = d.reading, p = d.prediction;
+  setPill(document.getElementById('online'), d.online ? 'ok' : 'off', d.online ? 'Meter online' : 'Meter offline');
+  document.getElementById('seen').textContent = 'last reading ' + d.seconds_ago + ' s ago';
+  document.getElementById('mtime').textContent = r.meter_time || '--';
+  document.getElementById('bal').textContent = fmt(r.balance, 3);
+  document.getElementById('balnad').textContent = fmt(d.balance_nad, 2);
+  document.getElementById('watts').textContent = fmt(r.watts, 2);
+  document.getElementById('volts').textContent = fmt(r.volts, 2);
+  document.getElementById('amps').textContent = fmt(r.amps, 3);
+  document.getElementById('today').textContent = fmt(p.today_kwh, 4);
+  document.getElementById('total').textContent = fmt(r.total, 4);
+  const st = document.getElementById('state'); st.textContent = d.state;
+  st.style.color = d.state === 'ON' ? css('--green') : d.state === 'OFF' ? css('--muted') : css('--red');
+
+  document.getElementById('daysleft').textContent = p.days_left === null ? '--' : fmt(p.days_left, 1);
+  document.getElementById('runout').textContent = p.run_out || '--';
+  const adv = document.getElementById('advice'); adv.className = 'advice ' + p.status; adv.textContent = p.message;
+  document.getElementById('topupby').textContent = p.topup_by || (p.status === 'empty' ? 'Now' : '--');
+  document.getElementById('rec').textContent = p.rec_nad > 0 ? `N$ ${p.rec_nad} (${fmt(p.rec_kwh, 2)} kWh)` : 'Not needed yet';
+  document.getElementById('predrate').textContent = fmt(p.pred_kwh_day, 4) + ' kWh/day';
+  document.getElementById('liverate').textContent = p.days_left_live === null ? '--'
+      : `${fmt(p.live_kwh_day, 4)} kWh/day → ${fmt(p.days_left_live, 1)} days`;
+  document.getElementById('method').textContent = p.method_label;
+  document.getElementById('tdays').textContent = p.target_days;
+  document.getElementById('histdays').textContent = p.history_days;
+  recNad = p.rec_nad;
+  document.getElementById('recBtn').textContent = recNad > 0 ? 'Recommended N$ ' + recNad : 'Recommended';
+
+  document.getElementById('fcTable').innerHTML = p.table.map(t =>
+    `<tr class="${t.balance_kwh <= 0 ? 'empty' : ''}"><td>${t.label}</td><td class="num">${fmt(t.use_kwh, 4)}</td>` +
+    `<td class="num">${t.balance_kwh <= 0 ? 'No credit' : fmt(t.balance_kwh, 3) + ' kWh'}</td></tr>`).join('');
+  drawPower(d.recent);
+}
+
+async function refreshTopups() {
+  const rows = await getJSON('/api/topups?meter=' + encodeURIComponent(METER));
+  document.getElementById('topups').innerHTML = rows.length ? rows.map(t =>
+    `<tr><td>${t.created_at.slice(5, 16)}</td><td class="num">${fmt(t.nad, 2)}</td><td class="num">${fmt(t.kwh, 3)}</td>` +
+    `<td><span class="badge ${t.status}">${t.status}</span></td></tr>`).join('')
+    : '<tr><td colspan="4" class="muted">None yet</td></tr>';
+}
+
+const nadIn = document.getElementById('nad');
+function updateConvert() {
+  const n = parseFloat(nadIn.value);
+  document.getElementById('convert').textContent = '= ' + (n > 0 ? (n / TARIFF).toFixed(3) : '--') + ' kWh';
+}
+nadIn.addEventListener('input', updateConvert);
+document.querySelectorAll('.quick button').forEach(b => b.addEventListener('click', () => {
+  const v = b.id === 'recBtn' ? recNad : +b.dataset.nad;
+  if (v > 0) { nadIn.value = v; updateConvert(); }
+}));
+
+document.getElementById('topupForm').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const msg = document.getElementById('topupMsg'), btn = document.getElementById('topupBtn');
+  const nad = parseFloat(nadIn.value);
+  if (!(nad > 0) || nad / TARIFF > MAX_KWH) { msg.className = 'msg err'; msg.textContent = 'Enter an amount up to N$ ' + MAX_KWH * TARIFF; return; }
+  btn.disabled = true;
+  const pinEl = document.getElementById('pin');
+  try {
+    const r = await fetch('/api/topup', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ meter: METER, nad, pin: pinEl ? pinEl.value : '' }) });
+    const j = await r.json();
+    if (j.ok) { msg.className = 'msg ok'; msg.textContent = `Queued N$ ${j.nad} = ${j.kwh} kWh. The meter will pick it up within 15 s.`; nadIn.value = ''; updateConvert(); }
+    else { msg.className = 'msg err'; msg.textContent = j.error; }
+  } catch (e) { msg.className = 'msg err'; msg.textContent = 'Could not reach the server.'; }
+  btn.disabled = false;
+  refreshTopups();
+});
+
+refresh(); refreshTopups();
+setInterval(refresh, 1000);
+setInterval(refreshTopups, 5000);
+</script>
+{% endblock %}

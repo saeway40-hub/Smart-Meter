@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Nehale Meter{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <!-- Chart.js 4.4.1 stored locally, so the page works without internet (e.g. on a phone hotspot) -->
+  <script src="{{ url_for('static', filename='chart.umd.min.js') }}"></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="bolt" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="20" height="20"><path d="M13 2 4 14h7l-1 8 9-12h-7z" fill="currentColor"/></svg>
+    </span>
+    <div>
+      <div class="brand-name">Nehale Smart Prepaid Meter</div>
+      <div class="brand-sub">Meter {{ meter }}</div>
+    </div>
+  </div>
+  <nav>
+    <a href="{{ url_for('dashboard') }}" class="{{ 'on' if page=='dashboard' }}">Live</a>
+    <a href="{{ url_for('history_page') }}" class="{{ 'on' if page=='history' }}">History</a>
+    <a href="{{ url_for('model_page') }}" class="{{ 'on' if page=='model' }}">Model</a>
+  </nav>
+</header>
+<main>
+  {% with msgs = get_flashed_messages(with_categories=true) %}
+    {% for cat, m in msgs %}<div class="flash {{ cat }}">{{ m }}</div>{% endfor %}
+  {% endwith %}
+  {% block body %}{% endblock %}
+</main>
+<footer>DPJ621S · Prepaid Electricity Meter Usage Predictor and Top-up Recommendation · S. E. Nehale</footer>
+<script>
+  const METER = {{ meter|tojson }};
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const fmt = (v, d = 2) => (v === null || v === undefined || isNaN(v)) ? "--" : Number(v).toFixed(d);
+  async function getJSON(u) { const r = await fetch(u); return r.json(); }
+  if (window.Chart) {
+    Chart.defaults.font.family = css('--font');
+    Chart.defaults.color = css('--muted');
+    Chart.defaults.borderColor = css('--grid');
+  }
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

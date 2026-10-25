@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Model · Nehale Meter{% endblock %}
+{% block body %}
+<section class="grid cols-2">
+  <div class="card">
+    <h2>Active prediction model</h2>
+    {% if model %}
+      <div class="kv">
+        <div>Name</div><div>{{ model.name }}</div>
+        <div>File</div><div>{{ model.info.file }}</div>
+        {% if model.info.trained_on %}<div>Trained on</div><div>{{ model.info.trained_on }}</div>{% endif %}
+        {% if model.info.trained_at %}<div>Trained</div><div>{{ model.info.trained_at }}</div>{% endif %}
+        {% if model.info.test_mae_rel is defined %}<div>Test error (MAE, % of mean)</div><div>{{ '%.1f'|format(model.info.test_mae_rel * 100) }} %</div>{% endif %}
+        {% if model.info.baseline_mae_rel is defined %}<div>7-day average error</div><div>{{ '%.1f'|format(model.info.baseline_mae_rel * 100) }} %</div>{% endif %}
+        {% if model.info.days_left_mae is defined %}<div>Days-left error (test)</div><div>{{ '%.2f'|format(model.info.days_left_mae) }} days</div>{% endif %}
+      </div>
+      {% if model.info.coef %}
+      <h2 style="margin-top:18px">Equation</h2>
+      <pre>kWh/day = {{ '%.4f'|format(model.info.intercept or 0) }}{% for f in model.info.features %}
+        {{ '%+.4f'|format(model.info.coef[loop.index0]) }} × {{ f }}{% endfor %}</pre>
+      <p class="muted small">Same equation as the firmware constants MB0…MB4 — you can paste them into the ESP32 too.</p>
+      {% endif %}
+      <a class="btn" href="{{ url_for('model_page', remove=1) }}">Remove model</a>
+    {% else %}
+      <p>No Colab model loaded. Predictions use the <b>average of the last 7 days</b>
+        (or the present load × 24 h before any day is finished).</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Load a model from Google Colab</h2>
+    <ol class="small">
+      <li>On the History page, download <b>Daily CSV (for Colab)</b> (optional — the notebook can also train on a public dataset).</li>
+      <li>Open <code>Nehale_Usage_Model.ipynb</code> in Google Colab and run all cells.</li>
+      <li>The last cell downloads <code>model.json</code>.</li>
+      <li>Upload it here. The dashboard starts using it immediately.</li>
+    </ol>
+    <form method="post" enctype="multipart/form-data" class="topup">
+      <input type="file" name="model" accept=".json,.joblib" required>
+      <button class="primary" type="submit">Upload model</button>
+    </form>
+    <p class="muted small" style="margin-top:12px">Features the model receives: {{ features|join(', ') }}
+      (yesterday, 2 days ago, 3 days ago, mean of the last 7 days — all in kWh/day). The model needs 7 finished
+      days of history; before that the average is used.</p>
+  </div>
+</section>
+{% endblock %}

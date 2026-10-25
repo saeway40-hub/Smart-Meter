@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}History · Nehale Meter{% endblock %}
+{% block body %}
+<div class="statusbar">
+  <div class="muted small">Usage per calendar day (meter date). Days with less than 6 h of credit are not used for prediction.</div>
+  <div>
+    <a class="btn" href="{{ url_for('export_daily', meter=meter) }}">Daily CSV (for Colab)</a>
+    <a class="btn" href="{{ url_for('export_readings', meter=meter) }}">All readings CSV</a>
+  </div>
+</div>
+
+<section class="grid cols-2">
+  <div class="card">
+    <h2>Daily energy use <span class="sub">kWh per day · forecast in amber</span></h2>
+    <div class="chart-box tall"><canvas id="dailyChart"></canvas></div>
+  </div>
+  <div class="card">
+    <h2>Balance over time <span class="sub">kWh</span></h2>
+    <div class="chart-box tall"><canvas id="balChart"></canvas></div>
+  </div>
+</section>
+
+<section class="grid cols-2" style="margin-top:16px">
+  <div class="card">
+    <h2>Daily usage table</h2>
+    <div class="scroll">
+      <table><thead><tr><th>Date</th><th class="num">Used (kWh)</th><th class="num">Hours with credit</th>
+        <th class="num">kWh/day (full day)</th></tr></thead>
+        <tbody id="dailyTable"><tr><td colspan="4" class="muted">No finished days yet</td></tr></tbody></table>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Events <span class="sub">top-ups, low balance, cut-offs, overloads</span></h2>
+    <div class="scroll">
+      <table><thead><tr><th>Meter date</th><th>Event</th><th class="num">Balance</th></tr></thead>
+        <tbody id="events"><tr><td colspan="3" class="muted">No events yet</td></tr></tbody></table>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const EVENT_NAMES = { TOPUP_WEB: 'Top-up (web)', TOPUP_SMS: 'Top-up (SMS)', TOPUP_KEYPAD: 'Top-up (keypad)',
+  LOW: 'Low balance alert', CUTOFF: 'Cut off - zero balance', OVERLOAD: 'Overload trip', BOOT: 'Meter started' };
+
+(async () => {
+  const d = await getJSON('/api/history?days=30&meter=' + encodeURIComponent(METER));
+  const daily = d.daily, fc = d.prediction.table;
+
+  document.getElementById('dailyTable').innerHTML = daily.length ? daily.slice().reverse().map(r =>
+    `<tr><td>${r.date}</td><td class="num">${fmt(r.kwh_used, 4)}</td><td class="num">${fmt(r.credit_hours, 1)}</td>` +
+    `<td class="num">${r.valid ? fmt(r.kwh_per_day, 4) : '<span class="muted">not used</span>'}</td></tr>`).join('')
+    : '<tr><td colspan="4" class="muted">No finished days yet</td></tr>';
+
+  document.getElementById('events').innerHTML = d.events.length ? d.events.map(e =>
+    `<tr><td>${e.meter_time || e.received_at}</td><td>${EVENT_NAMES[e.event] || e.event}</td>` +
+    `<td class="num">${fmt(e.balance, 3)} kWh</td></tr>`).join('')
+    : '<tr><td colspan="3" class="muted">No events yet</td></tr>';
+
+  if (!window.Chart) return;
+  const labels = daily.map(r => r.date.slice(5)).concat(fc.map(r => r.date.slice(5)));
+  const used = daily.map(r => r.valid ? r.kwh_per_day : r.kwh_used).concat(fc.map(() => null));
+  const pred = daily.map(() => null).concat(fc.map(r => r.use_kwh));
+  new Chart(document.getElementById('dailyChart'), {
+    type: 'bar',
+    data: { labels, datasets: [
+      { label: 'Measured', data: used, backgroundColor: css('--chart1'), borderRadius: 4 },
+      { label: 'Forecast', data: pred, backgroundColor: css('--chart2'), borderRadius: 4 } ] },
+    options: { maintainAspectRatio: false, scales: { x: { stacked: true }, y: { beginAtZero: true, title: { display: true, text: 'kWh' } } },
+               plugins: { legend: { position: 'bottom' } } }
+  });
+  new Chart(document.getElementById('balChart'), {
+    type: 'line',
+    data: { labels: d.balance.map(r => (r.t || '').slice(5)),
+            datasets: [{ label: 'Balance (kWh)', data: d.balance.map(r => r.b), borderColor: css('--chart1'),
+                         backgroundColor: css('--accent-soft'), fill: true, stepped: false, pointRadius: 0, borderWidth: 2 }] },
+    options: { maintainAspectRatio: false, plugins: { legend: { display: false } },
+               scales: { x: { ticks: { maxTicksLimit: 8 } }, y: { beginAtZero: true } } }
+  });
+})();
+</script>
+{% endblock %}

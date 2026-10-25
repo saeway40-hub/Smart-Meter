@@ -1,0 +1,23 @@
+{
+  "name": "Linear lag model",
+  "type": "linear",
+  "features": [
+    "lag1",
+    "lag2",
+    "lag3",
+    "mean7"
+  ],
+  "intercept": 0.0,
+  "coef": [
+    0.289014,
+    -0.13425,
+    0.136028,
+    0.695964
+  ],
+  "trained_on": "UCI Individual household electric power consumption (France, 2006-2010)",
+  "trained_at": "2026-10-24 19:22",
+  "train_days": 1089,
+  "test_mae_rel": 0.1703,
+  "baseline_mae_rel": 0.1728,
+  "days_left_mae": 3.078
+}

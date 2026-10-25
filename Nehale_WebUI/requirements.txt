@@ -1,0 +1,4 @@
+flask>=3.0
+# optional: only needed if you upload a model.joblib instead of model.json
+# scikit-learn
+# joblib
