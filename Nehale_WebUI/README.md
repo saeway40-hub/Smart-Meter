@@ -23,6 +23,20 @@ Settings are at the top of `app.py`: `TARIFF_NAD_PER_KWH` (2.0), `TOPUP_PIN` (12
 ### Test without the hardware
 In a second terminal: `python simulate_meter.py` — it sends exactly the same requests as the ESP32.
 
+### Hosted demo on Vercel
+The same app runs on Vercel (Root Directory `Nehale_WebUI`, framework Flask). Vercel's disk is
+read-only and nothing written to it is kept, so:
+
+* **Database** - in the Vercel project: *Storage → Create → Neon (Postgres)* and connect it to the project.
+  This sets `DATABASE_URL`; the app then uses Postgres instead of `meter.db`. Without it the app still
+  runs but readings vanish whenever Vercel restarts the function.
+* **Open demo** - on Vercel there is no sign-in (`PUBLIC_DEMO=1`); web top-up still needs the PIN.
+  Set your own **`TOPUP_PIN`** in *Settings → Environment Variables* (the default 1234 is public on GitHub).
+* **Meter** - in `secrets.h` set `SECRET_BACKEND_URL` to `https://<your-app>.vercel.app/api/meter`.
+  With an `https://` address the firmware sends a reading every 15 s and checks for top-ups every 10 s.
+* Model uploads are disabled on Vercel; change `models/model.json` in the repository instead.
+* Optional: `TZ_OFFSET_HOURS` (default 2, Namibia) for the run-out dates, `SECRET_KEY`.
+
 ## 2. Connect the ESP32
 
 The web app speaks the same protocol as the Google Apps Script backend the firmware already uses

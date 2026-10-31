@@ -1,4 +1,6 @@
 flask>=3.0
+# Postgres driver - only used when DATABASE_URL is set (hosted demo on Vercel)
+psycopg[binary]>=3.2
 # optional: only needed if you upload a model.joblib instead of model.json
 # scikit-learn
 # joblib

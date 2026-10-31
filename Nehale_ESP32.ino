@@ -72,7 +72,8 @@ const int N_TOKENS = sizeof(TOKENS) / sizeof(TOKENS[0]);
 // Same tuned weighted-average model as the web app (weights >= 0, sum 1). Only used while the web app
 // is unreachable: normally the LCD shows the web app's own days left / recommendation (see netTask).
 const float MB0 = 0.0, MB1 = 0.3243, MB2 = 0.0, MB3 = 0.1315, MB4 = 0.3745, MB5 = 0.1697;
-const unsigned long WEB_PRED_FRESH_MS = 15000;   // web values older than this -> local estimate
+// web values older than this -> local estimate (3 missed polls; see POLL_MS)
+#define WEB_PRED_FRESH_MS (3 * POLL_MS)
 
 // =====================================================================
 // 2. PINS (as soldered on the prototype board)
@@ -176,8 +177,11 @@ bool  predFromWeb = false;                               // LCD values come from
 
 // timers (real ms)
 unsigned long tPrint = 0, tSave = 0, tLcd = 0;
-const unsigned long LOG_MS  = 1000UL;   // send a reading every second so the web page is live
-const unsigned long POLL_MS = 1000UL;   // ask the web app for web top-ups + its prediction (LCD stays in step)
+// Laptop (http): every second, so the web page is live. Cloud (https, e.g. Vercel): every request is
+// a full TLS handshake (1-2 s on the ESP32) and the free plan limits requests -> slower.
+const bool BACKEND_IS_CLOUD = strncmp(SECRET_BACKEND_URL, "https", 5) == 0;
+const unsigned long LOG_MS  = BACKEND_IS_CLOUD ? 15000UL : 1000UL;   // send a reading
+const unsigned long POLL_MS = BACKEND_IS_CLOUD ? 10000UL : 1000UL;   // web top-ups + web prediction
 
 // ---- background tasks (core 0): WiFi/HTTP and GSM never block the meter loop ----
 struct Snapshot {                 // values the network task uploads

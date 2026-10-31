@@ -31,8 +31,17 @@ from werkzeug.security import check_password_hash, generate_password_hash
 import predictor
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.environ.get("NEHALE_DB", os.path.join(BASE, "meter.db"))
 MODEL_DIR = os.path.join(BASE, "models")
+
+# ---------------------------------------------------------------- hosting
+# Laptop: SQLite file + sign-in.  Vercel (read-only disk, nothing persists): Postgres from
+# DATABASE_URL (Vercel Storage -> Neon), settings from environment variables, open demo.
+ON_VERCEL = bool(os.environ.get("VERCEL"))
+DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL") or ""
+USE_PG = DATABASE_URL.startswith(("postgres://", "postgresql://"))
+DB_PATH = os.environ.get("NEHALE_DB", "/tmp/meter.db" if ON_VERCEL else os.path.join(BASE, "meter.db"))
+PUBLIC_DEMO = os.environ.get("PUBLIC_DEMO", "1" if ON_VERCEL else "0") == "1"   # no sign-in
+LOCAL_TZ = timezone(timedelta(hours=float(os.environ.get("TZ_OFFSET_HOURS", "2"))))  # Namibia = UTC+2
 
 # ---------------------------------------------------------------- settings
 METER_ID = os.environ.get("METER_ID", "NEHALE-01")
@@ -48,9 +57,12 @@ SECRET_FILE = os.path.join(BASE, "secret_key")     # signs the session cookie - 
 
 
 def load_secret_key():
-    """SECRET_KEY env var, else a random key generated once and kept in SECRET_FILE."""
+    """SECRET_KEY env var, else a random key generated once and kept in SECRET_FILE
+    (on Vercel the disk is read-only: a random in-memory key, fine without sign-in)."""
     if os.environ.get("SECRET_KEY"):
         return os.environ["SECRET_KEY"]
+    if ON_VERCEL:
+        return secrets.token_hex(32)
     if not os.path.exists(SECRET_FILE):
         with open(SECRET_FILE, "w") as f:
             f.write(secrets.token_hex(32))
@@ -64,14 +76,14 @@ app.permanent_session_lifetime = timedelta(hours=12)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS readings (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id {pk},
   meter TEXT, received_at TEXT, meter_time TEXT, event TEXT,
   balance REAL, total REAL, volts REAL, amps REAL, watts REAL, relay INTEGER,
   simday INTEGER, daykwh REAL, pred REAL, daysleft REAL, recnad REAL, demo INTEGER, runout TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_readings_meter ON readings(meter, id);
 CREATE TABLE IF NOT EXISTS topups (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id {pk},
   meter TEXT, kwh REAL, nad REAL, status TEXT,
   created_at TEXT, sent_at TEXT, confirmed_at TEXT
 );
@@ -79,10 +91,73 @@ CREATE TABLE IF NOT EXISTS topups (
 
 
 # ---------------------------------------------------------------- database
+# The queries are written for SQLite ("?" placeholders, rows readable by name or index).
+# For Postgres a thin wrapper gives the same interface, so the rest of the app is unchanged.
+class PgRow:
+    """Row readable as r["col"], r[0], r.keys(), and iterable over its values (like sqlite3.Row)."""
+    __slots__ = ("_names", "_values", "_index")
+
+    def __init__(self, names, values):
+        self._names, self._values = names, values
+        self._index = {n: i for i, n in enumerate(names)}
+
+    def __getitem__(self, k):
+        return self._values[k] if isinstance(k, int) else self._values[self._index[k]]
+
+    def keys(self):
+        return list(self._names)
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self):
+        return len(self._values)
+
+
+class PgDB:
+    def __init__(self, url):
+        import psycopg
+        # prepare_threshold=None: Neon's pooled (PgBouncer) URL does not keep prepared statements
+        self.con = psycopg.connect(url, prepare_threshold=None, connect_timeout=10)
+
+    @staticmethod
+    def _sql(sql):
+        return sql.replace("?", "%s").replace("(id % %s)", "(id %% %s)")
+
+    def _cursor(self):
+        def factory(c):
+            names = [d.name for d in (c.description or [])]       # INSERT/UPDATE: no columns
+            return lambda vals: PgRow(names, vals)
+        return self.con.cursor(row_factory=factory)
+
+    def execute(self, sql, params=()):
+        cur = self._cursor()
+        cur.execute(self._sql(sql), params)
+        return cur
+
+    def executemany(self, sql, seq):
+        cur = self._cursor()
+        cur.executemany(self._sql(sql), seq)
+        return cur
+
+    def commit(self):
+        self.con.commit()
+
+    def close(self):
+        self.con.close()
+
+
+def connect_db():
+    if USE_PG:
+        return PgDB(DATABASE_URL)
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    return con
+
+
 def db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
+        g.db = connect_db()
     return g.db
 
 
@@ -94,10 +169,17 @@ def close_db(_exc):
 
 
 def init_db():
-    con = sqlite3.connect(DB_PATH)
-    con.executescript(SCHEMA)
+    con = connect_db()
+    if USE_PG:
+        for stmt in SCHEMA.format(pk="BIGSERIAL PRIMARY KEY").split(";"):
+            if stmt.strip():
+                con.execute(stmt)
+        con.commit()
+    else:
+        con.executescript(SCHEMA.format(pk="INTEGER PRIMARY KEY AUTOINCREMENT"))
     con.close()
-    os.makedirs(MODEL_DIR, exist_ok=True)
+    if not ON_VERCEL:
+        os.makedirs(MODEL_DIR, exist_ok=True)
 
 
 def utcnow():
@@ -158,13 +240,22 @@ def save_account(username, password):
 
 @app.before_request
 def require_login():
-    if request.endpoint in OPEN_ENDPOINTS or session.get("user"):
+    if PUBLIC_DEMO or request.endpoint in OPEN_ENDPOINTS or session.get("user"):
         return None
     if request.path.startswith(("/api/", "/export/")):          # page scripts: tell them to re-login
         return jsonify(error="login required"), 401
     if load_account() is None:
         return redirect(url_for("setup"))
     return redirect(url_for("login", next=request.full_path if request.query_string else request.path))
+
+
+PROXY_HEADERS = ("Cf-Connecting-Ip", "Cf-Ray", "X-Forwarded-For", "X-Real-Ip", "Forwarded")
+
+
+def is_local_request():
+    """True only for a browser on this PC. A tunnel (Cloudflare, ngrok) also connects from
+    127.0.0.1, but adds forwarding headers - those visitors are NOT local."""
+    return request.remote_addr in LOCAL_ADDRS and not any(h in request.headers for h in PROXY_HEADERS)
 
 
 def safe_next(target):
@@ -174,6 +265,8 @@ def safe_next(target):
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    if PUBLIC_DEMO:
+        return redirect(url_for("dashboard"))
     account = load_account()
     if account is None:
         return redirect(url_for("setup"))
@@ -193,9 +286,11 @@ def login():
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
+    if PUBLIC_DEMO:
+        return redirect(url_for("dashboard"))
     if load_account() is not None:
         return redirect(url_for("login"))
-    local = request.remote_addr in LOCAL_ADDRS
+    local = is_local_request()
     error = None
     if request.method == "POST" and local:
         user = request.form.get("username", "").strip()
@@ -273,7 +368,7 @@ def prediction_for(meter, last):
     rows = session_readings(meter)
     history = predictor.daily_history(rows)
     # run-out / top-up-by dates count from the PC's real clock, not the meter's (fast) demo calendar
-    now = datetime.now()
+    now = datetime.now(LOCAL_TZ).replace(tzinfo=None)               # Vercel's servers run on UTC
     live_w = last["watts"] if last and last["relay"] else 0.0
     load_on = bool(last and last["relay"] and last["amps"] > 0)     # same rule as the "Load: ON" status
     model = predictor.load_model(MODEL_DIR)
@@ -405,6 +500,10 @@ def history_page():
 
 @app.route("/model", methods=["GET", "POST"])
 def model_page():
+    if ON_VERCEL and (request.method == "POST" or request.args.get("remove")):
+        flash("The hosted demo is read-only: the model is changed by updating models/model.json in the "
+              "GitHub repository (or on the laptop version).", "error")
+        return redirect(url_for("model_page"))
     if request.method == "POST":
         f = request.files.get("model")
         if not f or not f.filename:

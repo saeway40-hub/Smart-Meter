@@ -23,8 +23,10 @@
     <a href="{{ url_for('dashboard') }}" class="{{ 'on' if page=='dashboard' }}">Live</a>
     <a href="{{ url_for('history_page') }}" class="{{ 'on' if page=='history' }}">History</a>
     <a href="{{ url_for('model_page') }}" class="{{ 'on' if page=='model' }}">Model</a>
+    {% if session.user %}
     <span class="user">{{ session.user }}</span>
     <a href="{{ url_for('logout') }}">Sign out</a>
+    {% endif %}
   </nav>
 </header>
 <main>
