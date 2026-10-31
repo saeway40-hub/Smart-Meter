@@ -1,7 +1,9 @@
 # private settings (WiFi password, phone number)
 secrets.h
 
-# web app runtime data
+# web app runtime data and login secrets
 Nehale_WebUI/meter.db
+Nehale_WebUI/auth.json
+Nehale_WebUI/secret_key
 __pycache__/
 *.pyc

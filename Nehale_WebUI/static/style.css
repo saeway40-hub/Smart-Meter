@@ -98,7 +98,7 @@ form.topup { display: flex; flex-direction: column; gap: 10px; }
 .quick { display: flex; gap: 6px; flex-wrap: wrap; }
 .quick button { flex: 1; }
 label { font-size: 13px; color: var(--muted); display: block; margin-bottom: 4px; }
-input[type=number], input[type=password], input[type=file] {
+input[type=number], input[type=password], input[type=file], input[type=text] {
   width: 100%; padding: 10px 12px; border-radius: 9px; border: 1px solid var(--line);
   background: var(--bg); color: var(--text); font: inherit; font-size: 16px; }
 button, .btn { font: inherit; font-weight: 600; border-radius: 9px; padding: 10px 14px; cursor: pointer;
@@ -122,3 +122,12 @@ button:disabled { opacity: .6; cursor: default; }
 code, pre { font-family: Consolas, ui-monospace, monospace; font-size: 13px; }
 pre { background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 12px; overflow: auto; }
 ol li { margin-bottom: 6px; }
+
+/* sign-in / first-time setup */
+.auth-wrap { max-width: 400px; min-height: 100vh; margin: 0 auto; padding: 48px 16px 24px;
+             display: flex; flex-direction: column; justify-content: center; gap: 20px; }
+.auth-brand { justify-content: center; }
+.auth-card { padding: 24px; }
+.auth-card h2 { font-size: 18px; }
+.auth-wrap footer { padding: 0; }
+nav .user { color: var(--muted); font-size: 13px; padding: 7px 4px 7px 14px; }

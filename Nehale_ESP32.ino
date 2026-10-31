@@ -68,8 +68,11 @@ const int N_TOKENS = sizeof(TOKENS) / sizeof(TOKENS[0]);
 
 // --- Usage model (from the Colab notebook, section 8) ---
 // predicted kWh/day = MB0 + MB1*yesterday + MB2*2 days ago + MB3*3 days ago + MB4*mean of last 7 days
-// Trained on the UCI household dataset (1089 days, test error 17.0 % vs 17.3 % for the 7-day average).
-const float MB0 = 0.0, MB1 = 0.2890, MB2 = -0.1343, MB3 = 0.1360, MB4 = 0.6960;
+//                   + MB5*same weekday last week
+// Same tuned weighted-average model as the web app (weights >= 0, sum 1). Only used while the web app
+// is unreachable: normally the LCD shows the web app's own days left / recommendation (see netTask).
+const float MB0 = 0.0, MB1 = 0.3243, MB2 = 0.0, MB3 = 0.1315, MB4 = 0.3745, MB5 = 0.1697;
+const unsigned long WEB_PRED_FRESH_MS = 15000;   // web values older than this -> local estimate
 
 // =====================================================================
 // 2. PINS (as soldered on the prototype board)
@@ -167,11 +170,14 @@ float dayOnSeconds = 0;        // simulated seconds the relay was ON today
 float powerAvgW = 0;           // smoothed power for the live estimate
 
 float predKWhDay = 0, daysLeft = 0, recNAD = 0;
+float webDaysLeft = -1, webRecNAD = 0, webPredKWh = 0;   // from the web app (poll reply)
+unsigned long tWebPred = 0;                              // when they arrived (0 = never)
+bool  predFromWeb = false;                               // LCD values come from the web app
 
 // timers (real ms)
 unsigned long tPrint = 0, tSave = 0, tLcd = 0;
 const unsigned long LOG_MS  = 1000UL;   // send a reading every second so the web page is live
-const unsigned long POLL_MS = 3000UL;   // ask the web app for web top-ups
+const unsigned long POLL_MS = 1000UL;   // ask the web app for web top-ups + its prediction (LCD stays in step)
 
 // ---- background tasks (core 0): WiFi/HTTP and GSM never block the meter loop ----
 struct Snapshot {                 // values the network task uploads
@@ -473,6 +479,14 @@ void netTask(void*) {
       if (p >= 0) {
         float kwh = r.substring(p + 6).toFloat();
         if (kwh > 0) { portENTER_CRITICAL(&snapMux); webTopupKWh += kwh; portEXIT_CRITICAL(&snapMux); }
+        // reply also carries the web app's prediction: {"kwh":0,"days":12.3,"rec":5,"pred":0.15}
+        int pd = r.indexOf("\"days\":"), pr = r.indexOf("\"rec\":"), pp = r.indexOf("\"pred\":");
+        if (pd >= 0 && pr >= 0 && pp >= 0) {
+          float d = r.substring(pd + 7).toFloat(), rc = r.substring(pr + 6).toFloat(), pk = r.substring(pp + 7).toFloat();
+          portENTER_CRITICAL(&snapMux);
+          webDaysLeft = d; webRecNAD = rc; webPredKWh = pk; tWebPred = millis();
+          portEXIT_CRITICAL(&snapMux);
+        }
       }
     }
     if (now - tLogN >= LOG_MS) { tLogN = now; sendLog("READING"); }
@@ -579,8 +593,10 @@ void handleSMS(const String& sender, String body) {
   lcdMsg("SMS received", body, 800);   // short notification only, not part of the rotation
 
   if (body == "BAL" || body == "BALANCE") {
-    sendSMS(sender, "Nehale meter: balance " + String(balanceKWh, 2) + " kWh, about " +
-            String(daysLeft, 1) + " days left. Recommended top-up N$" + String(recNAD, 0) + ".");
+    sendSMS(sender, "Nehale meter: balance " + String(balanceKWh, 2) + " kWh, " +
+            (!loadOn ? String("load is off - no units being used")
+                     : daysLeft < 0 ? String("days left not known yet") : "about " + daysLeftText() + " days left") +
+            ". Recommended top-up N$" + String(recNAD, 0) + ".");
     return;
   }
   if (body.startsWith("ADD")) {
@@ -666,10 +682,13 @@ void pushDay(float kwh) {
   if (histCount < HIST) histCount++;
 }
 
+// Days left as text: "--" while the web app has no estimate yet (same as the web page)
+String daysLeftText() { return daysLeft < 0 ? String("--") : String(daysLeft, 1); }
+
 void updatePrediction() {
   if (histCount >= 7) {
     float m7 = 0; for (int i = 0; i < 7; i++) m7 += dayHist[i]; m7 /= 7.0;
-    predKWhDay = MB0 + MB1 * dayHist[0] + MB2 * dayHist[1] + MB3 * dayHist[2] + MB4 * m7;
+    predKWhDay = MB0 + MB1 * dayHist[0] + MB2 * dayHist[1] + MB3 * dayHist[2] + MB4 * m7 + MB5 * dayHist[6];
   } else if (histCount > 0) {
     float s = 0; for (int i = 0; i < histCount; i++) s += dayHist[i];
     predKWhDay = s / histCount;
@@ -681,6 +700,8 @@ void updatePrediction() {
   if (daysLeft > 999) daysLeft = 999;
   recNAD = (TARGET_DAYS * predKWhDay - balanceKWh) * TARIFF_NAD_PER_KWH;
   if (recNAD < 0) recNAD = 0;
+  // load off: nothing is being used, so the balance lasts until a load comes on (same rule as the web app)
+  if (balanceKWh > 0.0005 && !loadOn) { daysLeft = -1; recNAD = 0; }   // shown as "--"
 }
 
 // =====================================================================
@@ -847,6 +868,13 @@ void loop() {
     currentDay = d; dayKWh = 0; dayOnSeconds = 0;
   }
   updatePrediction();
+  // show exactly the web app's figures while they are fresh (same model, same history as the web page)
+  {
+    float wd, wr, wp; unsigned long tw;
+    portENTER_CRITICAL(&snapMux); wd = webDaysLeft; wr = webRecNAD; wp = webPredKWh; tw = tWebPred; portEXIT_CRITICAL(&snapMux);
+    predFromWeb = tw != 0 && millis() - tw < WEB_PRED_FRESH_MS;
+    if (predFromWeb) { daysLeft = wd; recNAD = wr; predKWhDay = wp; }   // wd < 0 = web shows "--"
+  }
 
   // ---------- 4. PROTECTION ----------
   if (!overload && digitalRead(RELAY_PIN) && now - tRelayOn > RELAY_SETTLE_MS) {
@@ -884,7 +912,7 @@ void loop() {
     lowAlertSent = true;
     Serial.println("[ALERT] LOW balance");
     beep(2, 300);
-    sendSMS(OWNER_PHONE, "Nehale meter: LOW balance " + String(balanceKWh, 2) + " kWh (~" + String(daysLeft, 1) +
+    sendSMS(OWNER_PHONE, "Nehale meter: LOW balance " + String(balanceKWh, 2) + " kWh (~" + daysLeftText() +
             " days). Recommended top-up N$" + String(recNAD, 0) + ".");
     logToBackend("LOW");
   }
@@ -967,7 +995,7 @@ void loop() {
     Serial.print(" | P "); Serial.print(watts, 2);
     Serial.print(" W | Bal "); Serial.print(balanceKWh, 4);
     Serial.print(" kWh | Day "); Serial.print(currentDay);
-    Serial.print(" | Pred "); Serial.print(predKWhDay, 4);
+    Serial.print(predFromWeb ? " | Pred(web) " : " | Pred(local) "); Serial.print(predKWhDay, 4);
     Serial.print(" kWh/d | Left "); Serial.print(daysLeft, 1);
     Serial.print(" d | Rec N$"); Serial.print(recNAD, 2);
     Serial.print(" | GPIO19 "); Serial.println(digitalRead(RELAY_PIN) ? "HIGH" : "LOW");
@@ -990,7 +1018,10 @@ void loop() {
     else {
       int s = (now / 3000) % 4;
       if (s == 0)      { lcd.print("P:"); lcd.print(watts, 1); lcd.print("W I:"); lcd.print(amps, 2); lcd.print("A  "); }
-      else if (s == 1) { lcd.print("Days left:"); lcd.print(daysLeft, 1); lcd.print("     "); }
+      else if (s == 1) {
+        if (!loadOn) lcd.print("Days:-- Load OFF");            // nothing drawing: no run-out (web shows the same)
+        else { lcd.print("Days left:"); lcd.print(daysLeftText()); lcd.print("     "); }
+      }
       else if (s == 2) { lcd.print("Rec: N$"); lcd.print(recNAD, 0); lcd.print("        "); }
       else             { lcd.print("V:"); lcd.print(volts, 1); lcd.print(wifiReady() ? " WiFi OK " : " no WiFi "); }
     }

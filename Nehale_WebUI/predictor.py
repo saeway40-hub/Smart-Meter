@@ -175,27 +175,46 @@ def load_model(model_dir):
 
 
 # ---------------------------------------------------------------- forecast
+def _mean(v):
+    return sum(v) / len(v)
+
+
+def all_features(hist):
+    """hist: kWh/day values, oldest first (at least 7). Every feature a model may use;
+    a model reads only the ones listed in its model.json. lag7 = same weekday last week."""
+    n = len(hist)
+    f = {f"lag{k}": hist[-k] if n >= k else hist[0] for k in range(1, 8)}
+    f["mean3"] = _mean(hist[-3:])
+    f["mean7"] = _mean(hist[-7:])
+    f["mean14"] = _mean(hist[-14:])
+    return f
+
+
 def features_from(hist):
-    """hist: kWh/day values, oldest first. Same features as the firmware."""
-    last7 = hist[-7:]
-    return {"lag1": hist[-1], "lag2": hist[-2], "lag3": hist[-3], "mean7": sum(last7) / len(last7)}
+    """Kept for compatibility (firmware features: lag1, lag2, lag3, mean7)."""
+    return all_features(hist)
+
+
+def model_min_history(model):
+    return int(model.info.get("min_history", 7)) if model is not None else 7
 
 
 def next_day(hist, model):
-    if len(hist) >= 7 and model is not None:
-        return model.predict(features_from(hist)), "model"
+    if model is not None and len(hist) >= model_min_history(model):
+        return model.predict(all_features(hist)), "model"
     if hist:
         last = hist[-7:]
         return sum(last) / len(last), "average"
     return 0.0, "none"
 
 
-def forecast(balance_kwh, history, live_watts, now, model, tariff, target_days=30, horizon=7):
+def forecast(balance_kwh, history, live_watts, now, model, tariff, target_days=30, horizon=7, load_on=True):
     """
     balance_kwh : current balance
     history     : output of daily_history()
     live_watts  : power the load is drawing right now
-    now         : meter date/time (datetime)
+    now         : date/time the run-out date is counted from (the PC's real clock)
+    load_on     : False = nothing is drawing current -> no units are used: days left "--", no top-up needed
     Returns a dict that the web page shows.
     """
     hist = [d["kwh_per_day"] for d in history if d["valid"]]
@@ -244,19 +263,27 @@ def forecast(balance_kwh, history, live_watts, now, model, tariff, target_days=3
 
     days_left_live = round(balance_kwh / live_kwh_day, 1) if live_kwh_day > 1e-6 else None
 
-    run_out = now + timedelta(days=days_left) if days_left is not None and balance_kwh > 0 else None
+    # load switched off: the balance is not going down, so there is no run-out to show ("--")
+    load_off = balance_kwh > 0 and not load_on
+    if load_off:
+        days_left = None
+
+    run_out = (now + timedelta(days=days_left) if days_left is not None and balance_kwh > 0 and not load_off
+               else None)
     topup_by = None
     if run_out is not None:
         topup_by = max(now, run_out - timedelta(days=2))  # 2-day safety margin
 
     # 3. recommended top-up: enough for target_days of forecast use, minus what is left
-    need_kwh = sum(rates[:int(target_days)]) - balance_kwh if rates else 0.0
+    need_kwh = sum(rates[:int(target_days)]) - balance_kwh if rates and not load_off else 0.0
     need_kwh = max(need_kwh, 0.0)
     rec_nad = math.ceil(need_kwh * tariff) if need_kwh > 1e-6 else 0
 
     # 4. status message
     if balance_kwh <= 0:
         status, msg = "empty", "No credit - the load is switched off. Top up now."
+    elif load_off:
+        status, msg = "ok", "The load is off - no units are being used."
     elif days_left is None:
         status, msg = "unknown", "Not enough data yet - switch the load on so the meter can learn your usage."
     elif days_left < 3:
@@ -269,7 +296,7 @@ def forecast(balance_kwh, history, live_watts, now, model, tariff, target_days=3
     # 5. day-by-day table
     table, bal = [], balance_kwh
     for i in range(horizon):
-        p = rates[i] if i < len(rates) else 0.0
+        p = rates[i] if i < len(rates) and not load_off else 0.0
         bal = max(bal - p, 0.0)
         day = (now + timedelta(days=i + 1)).date()
         table.append({"date": day.isoformat(), "label": day.strftime("%a %d %b"),
@@ -277,7 +304,8 @@ def forecast(balance_kwh, history, live_watts, now, model, tariff, target_days=3
 
     method_label = {
         "model": f"{model.name if model else 'Model'} (Google Colab)",
-        "average": "Average of the last %d days (model needs 7 days of history)" % min(len(hist), 7)
+        "average": "Average of the last %d days (model needs %d days of history)" % (min(len(hist), 7),
+                                                                                 model_min_history(model))
                    if model else "Average of the last %d days (no Colab model loaded)" % min(len(hist), 7),
         "live": "Present load x 24 h (no daily history yet)",
         "none": "No data yet",

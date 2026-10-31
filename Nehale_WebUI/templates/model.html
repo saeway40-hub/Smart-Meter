@@ -18,7 +18,15 @@
       <h2 style="margin-top:18px">Equation</h2>
       <pre>kWh/day = {{ '%.4f'|format(model.info.intercept or 0) }}{% for f in model.info.features %}
         {{ '%+.4f'|format(model.info.coef[loop.index0]) }} × {{ f }}{% endfor %}</pre>
+      {% if model.info.features|length == 4 %}
       <p class="muted small">Same equation as the firmware constants MB0…MB4 — you can paste them into the ESP32 too.</p>
+      {% else %}
+      <p class="muted small">Used by the web app. The meter's LCD keeps its own simpler 4-input estimate (MB0…MB4).</p>
+      {% endif %}
+      {% if model.info.previous_model_test_mae_rel is defined %}
+      <p class="muted small">Tuned: also checked on this meter's recorded data, where it keeps days-left forecasts stable
+        (all weights positive), unlike the previous model.</p>
+      {% endif %}
       {% endif %}
       <a class="btn" href="{{ url_for('model_page', remove=1) }}">Remove model</a>
     {% else %}
@@ -39,9 +47,9 @@
       <input type="file" name="model" accept=".json,.joblib" required>
       <button class="primary" type="submit">Upload model</button>
     </form>
-    <p class="muted small" style="margin-top:12px">Features the model receives: {{ features|join(', ') }}
-      (yesterday, 2 days ago, 3 days ago, mean of the last 7 days — all in kWh/day). The model needs 7 finished
-      days of history; before that the average is used.</p>
+    <p class="muted small" style="margin-top:12px">Inputs the model receives: {{ features|join(', ') }}
+      (lagN = use N days ago, lag7 = same weekday last week, meanN = average of the last N days — all in kWh/day).
+      The model needs {{ min_history }} finished days of history; before that the average is used.</p>
   </div>
 </section>
 {% endblock %}

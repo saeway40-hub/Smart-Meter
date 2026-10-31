@@ -5,7 +5,8 @@ DPJ621S | Simon E. Nehale (223019267)
 Run:   python app.py          then open  http://localhost:5000
 The ESP32 talks to  http://<this PC's IP>:5000/api/meter  (set BACKEND_URL in the firmware).
 
-Pages
+Pages (sign-in required; the first visit from this PC creates the admin account)
+  /login     sign in            /setup  create the admin account (only from this PC)
   /          live readings, prediction / top-up recommendation, remote top-up
   /history   daily usage, balance over time, event log, CSV export
   /model     load the model trained in Google Colab (model.json)
@@ -16,14 +17,17 @@ ESP32 protocol (unchanged from the Google Apps Script backend)
 """
 import csv
 import io
+import json
 import os
+import secrets
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import (Flask, Response, flash, g, jsonify, redirect, render_template,
-                   request, url_for)
-
+                   request, session, url_for)
+from werkzeug.security import check_password_hash, generate_password_hash
+ 
 import predictor
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -39,8 +43,24 @@ MAX_TOPUP_KWH = 50.0        # same limit as SMS "ADD"
 OFFLINE_AFTER_S = 90        # meter counts as offline if nothing arrived for this long
 LAST_SEEN = {}              # meter -> time.time() of its last request (log or poll)
 
+AUTH_FILE = os.path.join(BASE, "auth.json")        # admin account (password hashed) - not in git
+SECRET_FILE = os.path.join(BASE, "secret_key")     # signs the session cookie - not in git
+
+
+def load_secret_key():
+    """SECRET_KEY env var, else a random key generated once and kept in SECRET_FILE."""
+    if os.environ.get("SECRET_KEY"):
+        return os.environ["SECRET_KEY"]
+    if not os.path.exists(SECRET_FILE):
+        with open(SECRET_FILE, "w") as f:
+            f.write(secrets.token_hex(32))
+    with open(SECRET_FILE) as f:
+        return f.read().strip()
+
+
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "nehale-dpj621s")
+app.secret_key = load_secret_key()
+app.permanent_session_lifetime = timedelta(hours=12)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS readings (
@@ -116,6 +136,91 @@ def seconds_since(utc_text):
     return (datetime.now(timezone.utc) - t).total_seconds()
 
 
+# ---------------------------------------------------------------- authentication
+# Every browser page and browser API needs a signed-in session. /api/meter stays open so the
+# ESP32 (which has no login) keeps working. The account is created once, from this PC only.
+OPEN_ENDPOINTS = {"login", "setup", "logout", "static", "meter_api"}
+LOCAL_ADDRS = {"127.0.0.1", "::1"}
+
+
+def load_account():
+    if not os.path.exists(AUTH_FILE):
+        return None
+    with open(AUTH_FILE) as f:
+        return json.load(f)
+
+
+def save_account(username, password):
+    with open(AUTH_FILE, "w") as f:
+        json.dump({"username": username, "password_hash": generate_password_hash(password),
+                   "created_at": utcnow()}, f, indent=2)
+
+
+@app.before_request
+def require_login():
+    if request.endpoint in OPEN_ENDPOINTS or session.get("user"):
+        return None
+    if request.path.startswith(("/api/", "/export/")):          # page scripts: tell them to re-login
+        return jsonify(error="login required"), 401
+    if load_account() is None:
+        return redirect(url_for("setup"))
+    return redirect(url_for("login", next=request.full_path if request.query_string else request.path))
+
+
+def safe_next(target):
+    """Only redirect back to a path on this site (no external redirects)."""
+    return target if target and target.startswith("/") and not target.startswith("//") else url_for("dashboard")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    account = load_account()
+    if account is None:
+        return redirect(url_for("setup"))
+    error = None
+    if request.method == "POST":
+        user = request.form.get("username", "").strip()
+        pw = request.form.get("password", "")
+        if user == account["username"] and check_password_hash(account["password_hash"], pw):
+            session.clear()
+            session.permanent = True
+            session["user"] = user
+            return redirect(safe_next(request.args.get("next")))
+        time.sleep(1)                                            # slows down password guessing
+        error = "Wrong username or password."
+    return render_template("login.html", mode="login", error=error)
+
+
+@app.route("/setup", methods=["GET", "POST"])
+def setup():
+    if load_account() is not None:
+        return redirect(url_for("login"))
+    local = request.remote_addr in LOCAL_ADDRS
+    error = None
+    if request.method == "POST" and local:
+        user = request.form.get("username", "").strip()
+        pw = request.form.get("password", "")
+        if len(user) < 3:
+            error = "Username must have at least 3 characters."
+        elif len(pw) < 8:
+            error = "Password must have at least 8 characters."
+        elif pw != request.form.get("password2", ""):
+            error = "The two passwords do not match."
+        else:
+            save_account(user, pw)
+            session.clear()
+            session.permanent = True
+            session["user"] = user
+            return redirect(url_for("dashboard"))
+    return render_template("login.html", mode="setup", error=error, local=local)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
 # ---------------------------------------------------------------- ESP32 endpoint
 @app.route("/api/meter", methods=["GET", "POST"])
 def meter_api():
@@ -148,8 +253,17 @@ def meter_api():
             con.executemany("UPDATE topups SET status='sent', sent_at=? WHERE id=?",
                             [(utcnow(), r["id"]) for r in rows])
             con.commit()
+        # The web app's prediction goes back too, so the meter's LCD shows exactly the same
+        # days left / recommended top-up as the web page (days -1 = not known yet).
+        last = latest_reading(meter)
+        days, rec, pred = -1.0, 0, 0.0
+        if last is not None:
+            fc, _ = prediction_for(meter, last)
+            days = fc["days_left"] if fc["days_left"] is not None else -1.0
+            rec, pred = fc["rec_nad"], fc["pred_kwh_day"]
         # written by hand so the firmware's  indexOf("\"kwh\":")  always finds it
-        return Response('{"kwh":%.4f}' % kwh, mimetype="application/json")
+        return Response('{"kwh":%.4f,"days":%.1f,"rec":%d,"pred":%.5f}' % (kwh, days, rec, pred),
+                        mimetype="application/json")
 
     return jsonify(error="unknown action"), 400
 
@@ -158,12 +272,13 @@ def meter_api():
 def prediction_for(meter, last):
     rows = session_readings(meter)
     history = predictor.daily_history(rows)
-    now = predictor.parse_meter_time(last["meter_time"]) if last else None
-    now = now or datetime.now()
+    # run-out / top-up-by dates count from the PC's real clock, not the meter's (fast) demo calendar
+    now = datetime.now()
     live_w = last["watts"] if last and last["relay"] else 0.0
+    load_on = bool(last and last["relay"] and last["amps"] > 0)     # same rule as the "Load: ON" status
     model = predictor.load_model(MODEL_DIR)
     fc = predictor.forecast(last["balance"] if last else 0.0, history, live_w, now, model,
-                            TARIFF_NAD_PER_KWH, TARGET_DAYS)
+                            TARIFF_NAD_PER_KWH, TARGET_DAYS, load_on=load_on)
     fc["today_kwh"] = round(predictor.today_usage(rows), 5)
     return fc, history
 
@@ -299,6 +414,8 @@ def model_page():
             try:
                 info = json.load(f.stream)
                 assert len(info["coef"]) == len(info.get("features", predictor.FEATURES))
+                known = predictor.all_features([1.0] * 14)               # every input the web app can compute
+                assert all(f in known for f in info.get("features", predictor.FEATURES))
             except Exception:
                 flash("That file is not a model.json exported by the Colab notebook.", "error")
             else:
@@ -324,7 +441,8 @@ def model_page():
         return redirect(url_for("model_page"))
     model = predictor.load_model(MODEL_DIR)
     return render_template("model.html", meter=current_meter(), model=model, page="model",
-                           features=predictor.FEATURES)
+                           features=model.info.get("features", predictor.FEATURES) if model else predictor.FEATURES,
+                           min_history=predictor.model_min_history(model))
 
 
 init_db()

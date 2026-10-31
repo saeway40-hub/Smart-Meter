@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ 'Create account' if mode == 'setup' else 'Sign in' }} · Nehale Meter</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="auth-page">
+<main class="auth-wrap">
+  <div class="brand auth-brand">
+    <span class="bolt" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="20" height="20"><path d="M13 2 4 14h7l-1 8 9-12h-7z" fill="currentColor"/></svg>
+    </span>
+    <div>
+      <div class="brand-name">Nehale Smart Prepaid Meter</div>
+      <div class="brand-sub">{{ 'First-time setup' if mode == 'setup' else 'Sign in to continue' }}</div>
+    </div>
+  </div>
+
+  <div class="card auth-card">
+    {% if mode == 'setup' %}
+      <h2>Create the admin account</h2>
+      {% if local %}
+        <p class="muted small">This account protects the dashboard, remote top-up and history.
+          You'll use it to sign in from this PC or a phone.</p>
+        {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+        <form method="post" class="topup" autocomplete="off">
+          <div><label for="username">Username</label>
+            <input id="username" name="username" type="text" required minlength="3" autofocus
+                   value="{{ request.form.username or '' }}"></div>
+          <div><label for="password">Password <span class="muted">(at least 8 characters)</span></label>
+            <input id="password" name="password" type="password" required minlength="8" autocomplete="new-password"></div>
+          <div><label for="password2">Repeat password</label>
+            <input id="password2" name="password2" type="password" required minlength="8" autocomplete="new-password"></div>
+          <button class="primary" type="submit">Create account</button>
+        </form>
+      {% else %}
+        <div class="flash error">The admin account has not been created yet.</div>
+        <p class="small">For safety it can only be created on the PC that runs the web app.
+          Open <code>http://127.0.0.1:5000</code> on that PC first, then sign in here.</p>
+      {% endif %}
+    {% else %}
+      <h2>Sign in</h2>
+      {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+      <form method="post" class="topup">
+        <div><label for="username">Username</label>
+          <input id="username" name="username" type="text" required autofocus autocomplete="username"
+                 value="{{ request.form.username or '' }}"></div>
+        <div><label for="password">Password</label>
+          <input id="password" name="password" type="password" required autocomplete="current-password"></div>
+        <button class="primary" type="submit">Sign in</button>
+      </form>
+    {% endif %}
+  </div>
+  <footer>DPJ621S · S. E. Nehale</footer>
+</main>
+</body>
+</html>

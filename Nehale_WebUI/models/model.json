@@ -1,23 +1,28 @@
 {
-  "name": "Linear lag model",
+  "name": "Tuned weighted-average model",
   "type": "linear",
   "features": [
     "lag1",
     "lag2",
     "lag3",
+    "lag7",
     "mean7"
   ],
+  "min_history": 7,
   "intercept": 0.0,
   "coef": [
-    0.289014,
-    -0.13425,
-    0.136028,
-    0.695964
+    0.324282,
+    0.0,
+    0.131489,
+    0.169726,
+    0.374503
   ],
-  "trained_on": "UCI Individual household electric power consumption (France, 2006-2010)",
-  "trained_at": "2026-10-24 19:22",
-  "train_days": 1089,
-  "test_mae_rel": 0.1703,
-  "baseline_mae_rel": 0.1728,
-  "days_left_mae": 3.078
+  "trained_on": "UCI Individual household electric power consumption (France, 2006-2010), all days",
+  "trained_at": "2026-10-31 13:14",
+  "train_days": 1440,
+  "fit": "weighted average",
+  "test_mae_rel": 0.1697,
+  "baseline_mae_rel": 0.1729,
+  "days_left_mae": 3.2,
+  "previous_model_test_mae_rel": 0.1698
 }

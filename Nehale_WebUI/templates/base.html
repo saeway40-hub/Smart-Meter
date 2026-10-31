@@ -23,6 +23,8 @@
     <a href="{{ url_for('dashboard') }}" class="{{ 'on' if page=='dashboard' }}">Live</a>
     <a href="{{ url_for('history_page') }}" class="{{ 'on' if page=='history' }}">History</a>
     <a href="{{ url_for('model_page') }}" class="{{ 'on' if page=='model' }}">Model</a>
+    <span class="user">{{ session.user }}</span>
+    <a href="{{ url_for('logout') }}">Sign out</a>
   </nav>
 </header>
 <main>
@@ -36,7 +38,11 @@
   const METER = {{ meter|tojson }};
   const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
   const fmt = (v, d = 2) => (v === null || v === undefined || isNaN(v)) ? "--" : Number(v).toFixed(d);
-  async function getJSON(u) { const r = await fetch(u); return r.json(); }
+  async function getJSON(u) {
+    const r = await fetch(u);
+    if (r.status === 401) { location.href = "{{ url_for('login') }}?next=" + encodeURIComponent(location.pathname); throw new Error("login required"); }
+    return r.json();
+  }
   if (window.Chart) {
     Chart.defaults.font.family = css('--font');
     Chart.defaults.color = css('--muted');
